@@ -22,21 +22,22 @@ PATTERNS = {
     "contract": rf"(?:length\s*of\s*)?contract(?:\s*length)?{SEP}"
                 r"(\d+\s*(?:-\s*)?(?:months?|years?|mo)|none|no\s*contract|not\s*required|month[-\s]to[-\s]month|n/?a)",
     "provider_monthly_fees": r"provider\s*monthly\s*fees(.{0,300}?)(?=one[-\s]?time|early\s*termination|government\s*taxes|$)",
-    "one_time_fees": r"one[-\s]?time\s*(?:fees|charges)[^$]{0,40}?(.{0,300}?)(?=early\s*termination|government\s*taxes|discounts|$)",
+    "one_time_fees": r"one[-\s]?time\s*(?:fees|charges)(?:\s*at\s*the\s*time\s*of\s*purchase)?(.{0,300}?)(?=early\s*termination|government\s*taxes|discounts|$)",
     "early_termination_fee": rf"early\s*termination\s*fee{SEP}(\$\s*[\d,.]+|none|n/?a|not\s*applicable)",
-    "typical_download": r"typical\s*download\s*speed[\W_]{0,12}([\d,.]+)\s*(gbps|mbps|kbps)?",
-    "typical_upload": r"typical\s*upload\s*speed[\W_]{0,12}([\d,.]+)\s*(gbps|mbps|kbps)?",
-    "typical_latency_ms": r"typical\s*latency[\W_]{0,12}([\d.]+)\s*(?:ms|milliseconds)?",
+    # values can be ranges on the label, e.g. "89-346 Mbps", "40-69 Milliseconds"
+    "typical_download": r"typical\s*download\s*speed[\W_]{0,12}([\d,.]+)(?:\s*[-\u2013to]+\s*([\d,.]+))?\s*(gbps|mbps|kbps)?",
+    "typical_upload": r"typical\s*upload\s*speed[\W_]{0,12}([\d,.]+)(?:\s*[-\u2013to]+\s*([\d,.]+))?\s*(gbps|mbps|kbps)?",
+    "typical_latency_ms": r"typical\s*latency[\W_]{0,12}([\d.]+(?:\s*[-\u2013]\s*[\d.]+)?)\s*(?:ms|milliseconds)?",
     "data_included": rf"data\s*included(?:\s*with\s*monthly\s*price)?{SEP}(unlimited|[\d,.]+\s*(?:gb|tb))",
 }
 FIELDS = [f + "_mbps" if f in ("typical_download", "typical_upload") else f for f in PATTERNS] + ["label_text"]
 
 
 def _speed(m: re.Match) -> str:
-    val = float(m.group(1).replace(",", ""))
-    unit = (m.group(2) or "mbps").lower()
-    val = val * 1000 if unit == "gbps" else val / 1000 if unit == "kbps" else val
-    return f"{val:g}"
+    unit = (m.group(3) or "mbps").lower()
+    factor = 1000 if unit == "gbps" else 0.001 if unit == "kbps" else 1
+    vals = [f"{float(v.replace(',', '')) * factor:g}" for v in (m.group(1), m.group(2)) if v]
+    return "-".join(vals)
 
 
 def _clean(s: str) -> str:
@@ -54,6 +55,9 @@ def parse_label(text: str) -> dict:
         else:
             out[field] = _clean(m.group(1))[:200]
     return out
+
+
+_CSS_RE = re.compile(r"[.#][\w-]+\s*\{[^}]*\}")
 
 
 def label_window(text: str, upi: str) -> str | None:
@@ -86,6 +90,6 @@ def enrich_upis(upis: list[dict], chunks: list[tuple[str, str]]) -> list[dict]:
                 continue
             for k, v in parse_label(win).items():
                 fields.setdefault(k, v)
-            fields.setdefault("label_text", re.sub(r"\s+", " ", win)[:3000])
+            fields.setdefault("label_text", re.sub(r"\s+", " ", _CSS_RE.sub(" ", win)).strip()[:3000])
         hit.update(fields)
     return upis

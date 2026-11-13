@@ -35,6 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--isp", nargs="*", help="only these ISP keys")
     sp.add_argument("--limit", type=int, help="stop after N lookups (good for testing)")
     sp.add_argument("--manual", action="store_true", help="pause for you to finish in the browser when automation fails")
+    sp.add_argument("--assist", action="store_true", help="assisted mode: you click through each site, the app reads the labels")
     sp.add_argument("--headless", action="store_true")
     sp.add_argument("--no-resume", action="store_true", help="redo lookups already in scrape_results.csv")
 
@@ -44,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--location-id", help="Fabric location_id (address + ISPs fetched from BigQuery)")
     lp.add_argument("--isp", nargs="*", help="ISP keys (default: all, or those NBM lists for the location)")
     lp.add_argument("--manual", action="store_true")
+    lp.add_argument("--assist", action="store_true")
     lp.add_argument("--headless", action="store_true")
 
     sub.add_parser("summary")
@@ -81,17 +83,17 @@ def main(argv: list[str] | None = None) -> int:
         path = a.tasks or output_dir(cfg) / "scrape_tasks.csv"
         tasks = pd.read_csv(path, dtype=str).fillna("")
         out = scrape_tasks(cfg, tasks, isps=a.isp, manual=a.manual, headless=a.headless or None,
-                           resume=not a.no_resume, limit=a.limit)
+                           resume=not a.no_resume, limit=a.limit, assist=a.assist)
         print(f"\nResults: {out}")
         return 0
 
     if a.cmd == "lookup":
-        from .scrapers import Address, SCRAPERS
+        from .scrapers import TUNED, Address
         from .scrapers.runner import scrape_address
         isps = a.isp
         if a.location_id:
-            from .definitions import match_isp
             from .pipeline import lookup_location
+            from .scrapers.isps import resolve_provider
             rec = lookup_location(cfg, a.location_id)
             if rec is None:
                 print("location_id not found in the Fabric table")
@@ -101,12 +103,13 @@ def main(argv: list[str] | None = None) -> int:
             print("NBM providers here:")
             for p in rec["providers"]:
                 print(f"   {p['brand_name']:<35} tech {p['technology']:<3} {p['down']:>7.0f}/{p['up']:<6.0f}"
-                      f" FRN {p['frn']}  -> scraper: {match_isp(p['brand_name']) or '-'}")
-            isps = isps or sorted({k for p in rec["providers"] if (k := match_isp(p["brand_name"]))})
+                      f" FRN {p['frn']}  -> {resolve_provider(p['brand_name'])}")
+            isps = isps or sorted({resolve_provider(p["brand_name"])[0] for p in rec["providers"]
+                                   if p["technology"] not in (60, 61)})
         else:
             addr = Address.parse(a.address)
-        isps = isps or list(SCRAPERS)
-        results = scrape_address(cfg, addr, isps, headless=a.headless or None, manual=a.manual)
+        isps = isps or sorted(TUNED)
+        results = scrape_address(cfg, addr, isps, headless=a.headless or None, manual=a.manual, assist=a.assist)
         rows = [r for res in results for r in res.rows()]
         df = pd.DataFrame(rows)
         print(df[["isp", "status", "upi", "frn", "message"]].to_string(index=False))

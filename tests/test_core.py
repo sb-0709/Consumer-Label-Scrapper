@@ -12,7 +12,7 @@ CFG = {
     "bigquery": {"nbm_table": "p.d.nbm", "fabric_table": "p.d.fab", "output_dataset": "p.out"},
     "competition": {"definition": "wired"},
     "speed": {"min_down": 100, "min_up": 20},
-    "scraper": {"isps": ["att", "verizon", "spectrum", "xfinity", "frontier", "cox"]},
+    "scraper": {"isps": ["att", "verizon", "spectrum", "xfinity"]},
 }
 
 
@@ -47,7 +47,8 @@ def test_isp_matching():
     assert match_isp("AT&T Inc.") == "att"
     assert match_isp("Spectrum") == "spectrum"
     assert match_isp("Comcast Cable Communications") == "xfinity"
-    assert match_isp("Cox Communications") == "cox"
+    assert match_isp("Cox Communications") == "spectrum"
+    assert match_isp("Frontier Communications") == "verizon"
     assert match_isp("Starlink") is None
 
 
@@ -75,8 +76,8 @@ def test_build_tasks():
                           '{"brand_name":"Local Fiber Co","frn":"0003333333","technology":50,"down":500,"up":500}]',
     }])
     tasks = build_tasks(locs, CFG)
-    assert sorted(tasks["isp"]) == ["att", "spectrum"]
-    assert "Local Fiber Co" in tasks.iloc[0]["other_qualifying_isps_not_scraped"]
+    assert sorted(tasks["isp"]) == ["att", "search_local_fiber_co", "spectrum"]      # satellite (61) excluded
+    assert dict(zip(tasks["isp"], tasks["check_mode"]))["search_local_fiber_co"] == "search"
 
 
 def test_partition_filter_is_literal():
@@ -145,3 +146,65 @@ def test_address_matching():
     assert house_number("100A Main St") == "100A"
     c = rank_candidates("100 Main Street", [{"address_primary": "100 MAPLE AVE"}, {"address_primary": "100 MAIN ST"}])
     assert c[0]["address_primary"] == "100 MAIN ST"
+
+
+def test_unit_formatting():
+    a = Address("3147 Broadway", "New York", "NY", "10027", unit="17")
+    assert a.one_line() == "3147 Broadway Apt 17, New York, NY 10027"
+    assert a.one_line(include_unit=False) == "3147 Broadway, New York, NY 10027"
+    assert Address("1 A St", unit="Unit 4B").street() == "1 A St Unit 4B"
+
+
+ATT_LABEL = ("Broadband Facts AT&T AT&T Internet Air Fixed Broadband Consumer Disclosure Monthly Price $65.00* "
+             "Additional Charges & Terms Provider Monthly Fees One-time Fees at the Time of Purchase Late Payment Fee $9.99 "
+             "Early Termination Fee $0.00 Speeds Provided with Plan Typical Download Speed 89-346 Mbps "
+             "Typical Upload Speed 8-30 Mbps Typical Latency 40-69 Milliseconds Data Included with Monthly Price Unlimited "
+             "fcc.gov/consumers F0005937974804842809955155 .gpcoverlayvisibility{opacity: 0}")
+
+
+def test_label_parser_ranges_from_real_att_label():
+    from clscraper.label_parser import enrich_upis
+    h = enrich_upis(find_upis(ATT_LABEL, "dom_text"), [("dom_text", ATT_LABEL)])[0]
+    assert h["typical_download_mbps"] == "89-346" and h["typical_upload_mbps"] == "8-30"
+    assert h["typical_latency_ms"] == "40-69" and h["monthly_price"] == "65.00"
+    assert h["early_termination_fee"] == "$0.00" and "Late Payment Fee $9.99" in h["one_time_fees"]
+    assert "gpcoverlay" not in h["label_text"]
+
+
+
+def test_resolve_every_provider():
+    from clscraper.scrapers import SCRAPERS, resolve_provider
+    assert resolve_provider("AT&T") == ("att", "tuned")
+    assert resolve_provider("Frontier Communications") == ("verizon", "tuned")
+    assert resolve_provider("T-Mobile") == ("tmobile", "known")
+    key, kind = resolve_provider("Morgan Wireless LLC")
+    assert kind == "search" and key == "search_morgan_wireless_llc"
+    assert SCRAPERS[key].assisted_only and "duckduckgo.com" in SCRAPERS[key].start_url
+
+
+def test_every_module_imports():
+    """Catches syntax/indentation errors in modules the other tests don't touch."""
+    import importlib
+    import pkgutil
+
+    import clscraper
+    for m in pkgutil.walk_packages(clscraper.__path__, "clscraper."):
+        importlib.import_module(m.name)
+    import py_compile
+    py_compile.compile("app.py", doraise=True)
+
+
+def test_import_saved_pages_html_and_mhtml():
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+
+    from clscraper.importer import file_to_chunks, import_labels
+    html = "<html><body><div class='modal'>" + ATT_LABEL.replace(" Monthly", "<br>Monthly") + "</div></body></html>"
+    r = import_labels("att", Address("13308 Ballfield Rd NE", "Little Orleans", "MD", "21766"),
+                      file_to_chunks("plans.html", html.encode()))
+    assert r.status == "ok" and r.upis[0]["upi"] == "F0005937974804842809955155"
+    assert r.upis[0]["typical_download_mbps"] == "89-346"
+    m = MIMEMultipart("related"); m["From"] = "<Saved by Blink>"
+    m.attach(MIMEText(html, "html", "utf-8"))          # Chrome .mhtml uses quoted-printable/base64 parts
+    chunks = file_to_chunks("plans.mhtml", m.as_bytes())
+    assert import_labels("att", Address("x"), chunks).upis[0]["monthly_price"] == "65.00"

@@ -8,7 +8,7 @@ import pandas as pd
 
 from . import bq
 from .config import output_dir
-from .definitions import DEFINITIONS, match_isp, qualifies
+from .definitions import DEFINITIONS, qualifies
 
 
 def build_competition(cfg: dict, log=print) -> pd.DataFrame:
@@ -84,20 +84,18 @@ def build_tasks(locs: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     """Expand each sampled location into the supported ISPs that NBM says serve it."""
     definition = cfg["competition"]["definition"]
     min_down, min_up = float(cfg["speed"]["min_down"]), float(cfg["speed"]["min_up"])
-    enabled = set(cfg["scraper"]["isps"])
+    from .scrapers.isps import resolve_provider
+
     rows = []
     for _, r in locs.iterrows():
         providers = json.loads(r.get("providers_json") or "[]")
         by_isp: dict[str, dict] = {}
-        unsupported = set()
         for p in providers:
             if not qualifies(p, definition, min_down, min_up):
                 continue
-            key = match_isp(p.get("brand_name"))
-            if key is None or key not in enabled:
-                unsupported.add(p.get("brand_name"))
-                continue
-            entry = by_isp.setdefault(key, {"frns": set(), "brands": set(), "techs": set(), "max_down": 0.0})
+            key, kind = resolve_provider(p.get("brand_name"))
+            entry = by_isp.setdefault(key, {"frns": set(), "brands": set(), "techs": set(), "max_down": 0.0,
+                                            "kind": kind})
             entry["frns"].add(p.get("frn"))
             entry["brands"].add(p.get("brand_name"))
             entry["techs"].add(str(p.get("technology")))
@@ -111,7 +109,7 @@ def build_tasks(locs: pd.DataFrame, cfg: dict) -> pd.DataFrame:
                 "nbm_frns": ";".join(sorted(f for f in e["frns"] if f)),
                 "nbm_technologies": ";".join(sorted(e["techs"])),
                 "nbm_max_down": e["max_down"],
-                "other_qualifying_isps_not_scraped": "; ".join(sorted(x for x in unsupported if x)),
+                "check_mode": e["kind"],   # tuned = automatic works; known/search = assisted only
             })
     return pd.DataFrame(rows)
 

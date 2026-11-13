@@ -41,12 +41,15 @@ sampling:
   seed: "fabric-v8"         # change to draw a different (but reproducible) random sample
 
 scraper:
-  isps: [att, verizon, spectrum, xfinity, frontier, cox]
+  isps: [att, verizon, spectrum, xfinity]   # Frontier -> Verizon, Cox -> Spectrum (mergers)
   headless: false           # watching the browser makes debugging much easier
-  browser_channel: null     # "chrome" to use your installed Google Chrome
+  browser_channel: chrome   # your installed Google Chrome (sites treat it like a normal browser); null = bundled Chromium
   slow_mo_ms: 50
   timeout_ms: 45000
   delay_between_requests_s: [8, 20]   # random polite pause between lookups
   max_label_clicks: 25
-  save_artifacts: true      # screenshot + HTML of every lookup, for auditing
+  persistent_profiles: false  # true = keep cookies per ISP between lookups (can cause stale redirects)
+  save_artifacts: true
+  trace: true
+  assist_max_minutes: 10    # assisted mode: how long to wait for you per ISP               # record every step to outputs/traces/*.zip (view: playwright show-trace <zip>)      # screenshot + HTML of every lookup, for auditing
   output_dir: outputs

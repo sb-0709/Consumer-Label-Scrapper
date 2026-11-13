@@ -1,0 +1,19 @@
+# Starting pages for ISPs WITHOUT a tuned scraper. They work in Assisted mode:
+# the page opens with the address typed in if a box is found, you click through to the plans
+# and Broadband Facts, and the app reads the labels.
+# Any provider not listed here gets a web search as its starting page instead.
+#
+#   key:      short id (letters/digits/_)
+#   name:     shown in the app
+#   patterns: regex matched (case-insensitive) against the NBM brand_name
+#   url:      where to start (verify, sites change)
+providers:
+  - {key: tmobile,     name: "T-Mobile Home Internet", patterns: 't-?mobile',                          url: "https://www.t-mobile.com/home-internet"}
+  - {key: breezeline,  name: "Breezeline",             patterns: 'breezeline|atlantic broadband',       url: "https://www.breezeline.com/"}
+  - {key: brightspeed, name: "Brightspeed",            patterns: 'brightspeed',                         url: "https://www.brightspeed.com/"}
+  - {key: kinetic,     name: "Kinetic (Windstream)",   patterns: 'windstream|kinetic',                  url: "https://www.windstream.com/"}
+  - {key: glofiber,    name: "Glo Fiber (Shentel)",    patterns: 'glo ?fiber|shentel|shenandoah',       url: "https://www.glofiber.com/"}
+  - {key: centurylink, name: "CenturyLink / Quantum Fiber", patterns: 'centurylink|quantum fiber|lumen', url: "https://www.centurylink.com/"}
+  - {key: optimum,     name: "Optimum (Altice)",       patterns: 'optimum|altice|cablevision',          url: "https://www.optimum.com/"}
+  - {key: mediacom,    name: "Mediacom",               patterns: 'mediacom',                            url: "https://mediacomcable.com/"}
+  - {key: wow,         name: "WOW!",                   patterns: 'wideopenwest|\bwow\b',                url: "https://www.wowway.com/"}

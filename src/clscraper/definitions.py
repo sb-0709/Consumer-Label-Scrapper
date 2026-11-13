@@ -21,11 +21,11 @@ DEFINITIONS = {
 # so brand matching is more robust; extend as needed).
 ISP_BRAND_PATTERNS = {
     "att":      r"\bAT\s*&\s*T\b|\bAT and T\b",
-    "verizon":  r"verizon|\bfios\b",
-    "spectrum": r"spectrum|charter",
+    # Frontier is now part of Verizon and Cox part of Charter (Spectrum); their sites hand off,
+    # so NBM rows for those brands are checked on the parent's site.
+    "verizon":  r"verizon|\bfios\b|frontier",
+    "spectrum": r"spectrum|charter|\bcox\b",
     "xfinity":  r"xfinity|comcast",
-    "frontier": r"frontier",
-    "cox":      r"\bcox\b",
 }
 
 

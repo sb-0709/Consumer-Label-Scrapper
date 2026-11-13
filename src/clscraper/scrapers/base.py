@@ -52,8 +52,16 @@ class Address:
     unit: str = ""
     location_id: str = ""
 
-    def one_line(self) -> str:
-        street = f"{self.line1} {self.unit}".strip() if self.unit else self.line1
+    def unit_label(self) -> str:
+        """'17' -> 'Apt 17'; keeps 'Unit 4B', 'Ste 200', '#5' as typed."""
+        u = (self.unit or "").strip()
+        return f"Apt {u}" if u and re.fullmatch(r"[A-Za-z]?\d+[A-Za-z]?|[A-Za-z]", u) else u
+
+    def street(self) -> str:
+        return f"{self.line1} {self.unit_label()}".strip() if self.unit else self.line1
+
+    def one_line(self, include_unit: bool = True) -> str:
+        street = self.street() if include_unit else self.line1
         tail = f"{self.state} {self.zip}".strip()
         return ", ".join(p for p in (street, self.city, tail) if p)
 
@@ -114,6 +122,7 @@ class BaseISPScraper:
     key = "base"
     name = "Generic ISP"
     start_url = ""
+    assisted_only = False      # True: no tuned automation, only works in assisted mode
 
     # Buttons/links that reveal the address form when it is not on the page yet
     open_form_selectors = [
@@ -154,6 +163,10 @@ class BaseISPScraper:
         'button:has-text("Got it")', 'button:has-text("No thanks")', 'button:has-text("No, thanks")',
         '[aria-label="Close"]:visible', '[aria-label="close"]:visible', 'button.close:visible',
     ]
+    # Opt-in per ISP (they changed AT&T's working flow when on for everyone):
+    unit_after_suggestion = False      # True: type street without unit, fill the unit box that appears after
+    text_pick_suggestion = False       # True: click a visible '3147 Broadway ...' suggestion by its text
+    keyboard_pick_suggestion = False   # True: press ArrowDown+Enter when no suggestion element is found
     label_link_patterns = [
         r"broadband\s*facts", r"broadband\s*(consumer\s*)?labels?", r"view\s*(the\s*)?labels?",
         r"plan\s*labels?", r"label\s*details",
@@ -167,6 +180,7 @@ class BaseISPScraper:
         r"we couldn.t find (that|your|this) address", r"(please )?verify your address",
         r"address (was )?not found", r"did you mean", r"select your address", r"choose your address",
     ]
+    call_to_order_patterns = [r"please call us to learn more", r"call (us )?to (order|get connected)"]
     blocked_patterns = [
         r"access denied", r"are you a (human|robot)", r"verify you are (a )?human",
         r"unusual (traffic|activity)", r"press (and|&) hold", r"request (was )?blocked",
@@ -181,12 +195,15 @@ class BaseISPScraper:
         self.max_label_clicks = max_label_clicks
         self.log = log
         self._responses = []
+        self._rejected: list[str] = []     # API calls refused by the site's bot protection
         page.set_default_timeout(timeout_ms)
         page.on("response", self._on_response)
 
     # ------------------------------------------------------------------ helpers
     def _on_response(self, resp) -> None:
         try:
+            if resp.status in (403, 418, 429) and resp.request.resource_type in ("xhr", "fetch"):
+                self._rejected.append(f"{resp.status} {resp.url.split('?')[0][-70:]}")
             if resp.request.resource_type in ("xhr", "fetch", "document"):
                 ctype = (resp.headers or {}).get("content-type", "")
                 if any(t in ctype for t in ("json", "text", "html", "javascript")):
@@ -217,6 +234,10 @@ class BaseISPScraper:
                 return self.page.inner_text("body")
             except Exception:
                 return ""
+
+    def _new_text(self, text: str) -> str:
+        baseline = getattr(self, "_baseline", set())
+        return "\n".join(line for line in text.splitlines() if line not in baseline)
 
     @staticmethod
     def _matches(patterns: list[str], text: str) -> bool:
@@ -251,26 +272,86 @@ class BaseISPScraper:
             if field_ is None:
                 raise RuntimeError("address input not found after opening the form")
 
-        zip_field = self.first_visible(self.zip_input_selectors, 800)
-        separate_zip = zip_field is not None and addr.zip
-        text = addr.line1 if separate_zip else addr.one_line()
+        self._baseline = set(self.body_text().splitlines())   # to ignore landing-page marketing text later
+
+        # Separate Apt / ZIP boxes only count if they are *different* elements from the street box
+        # (many sites use one box labelled "Street address and apartment").
+        zip_field = self._other_field(self.zip_input_selectors, field_)
+        unit_field = self._other_field(self.unit_input_selectors, field_) if addr.unit else None
+        separate_zip = zip_field is not None and bool(addr.zip)
+        unit_later = bool(addr.unit) and unit_field is None and self.unit_after_suggestion
+        include_unit = unit_field is None and not unit_later
+        if separate_zip:
+            text = addr.street() if include_unit else addr.line1
+        else:
+            text = addr.one_line(include_unit=include_unit)
         field_.click()
         field_.fill("")
         field_.type(text, delay=60)          # typing (not fill) triggers the autocomplete
         self.page.wait_for_timeout(1500)
         self.pick_suggestion(addr)
 
-        if addr.unit:
-            unit = self.first_visible(self.unit_input_selectors, 800)
-            if unit is not None:
-                unit.fill(addr.unit)
+        if unit_field is not None:
+            unit_field.fill(addr.unit)
+        elif unit_later:
+            self._fill_unit_after_suggestion(addr, field_)
         if separate_zip:
             zip_field.fill(addr.zip)
-        self.submit()
+        self.submit(near=field_)
+
+    def _fill_unit_after_suggestion(self, addr: Address, main: Locator, timeout_ms: int = 5000) -> bool:
+        """Some sites (Verizon) ask for the apartment only after the street address is picked."""
+        deadline = time.time() + timeout_ms / 1000
+        while time.time() < deadline:
+            field_ = self._other_field(self.unit_input_selectors, main)
+            if field_ is not None:
+                try:
+                    if field_.evaluate("e => e.tagName") == "SELECT":
+                        labels = field_.locator("option").all_inner_texts()
+                        hit = next((t for t in labels if re.search(rf"\b{re.escape(addr.unit)}\b", t)), None)
+                        if hit:
+                            field_.select_option(label=hit)
+                            return True
+                        return False
+                    field_.click()
+                    field_.fill("")
+                    field_.type(addr.unit, delay=60)
+                    self.page.wait_for_timeout(1200)
+                    opt = self.page.get_by_role("option").filter(has_text=re.compile(rf"\b{re.escape(addr.unit)}\b"))
+                    if opt.count() and opt.first.is_visible():
+                        opt.first.click()
+                    return True
+                except Exception:
+                    return False
+            self.page.wait_for_timeout(300)
+        return False
+
+    def _other_field(self, selectors: list[str], main: Locator) -> Locator | None:
+        """First visible field matching *selectors* that is not the *main* element."""
+        for sel in selectors:
+            try:
+                loc = self.page.locator(sel)
+                for i in range(min(loc.count(), 5)):
+                    el = loc.nth(i)
+                    if el.is_visible() and not el.evaluate("(a, b) => a === b", main.element_handle()):
+                        return el
+            except Exception:
+                continue
+        return None
 
     def pick_suggestion(self, addr: Address) -> bool:
         sug = self.first_visible(self.suggestion_selectors, 3000)
         if sug is None:
+            # Custom dropdowns (e.g. Verizon, inside shadow DOM) don't use listbox/option roles:
+            # find a visible suggestion by its text, else select the first one with the keyboard.
+            if self.text_pick_suggestion and self._pick_suggestion_by_text(addr):
+                return True
+            if self.keyboard_pick_suggestion:
+                self.page.keyboard.press("ArrowDown")
+                self.page.wait_for_timeout(300)
+                self.page.keyboard.press("Enter")
+                self.page.wait_for_timeout(800)
+                return True
             return False
         # Prefer the suggestion that contains the house number and the ZIP (or city)
         house = addr.line1.split()[0] if addr.line1 else ""
@@ -279,20 +360,79 @@ class BaseISPScraper:
                 opts = self.page.locator(sel)
                 if not (opts.count() and opts.first.is_visible()):
                     continue
-                for i in range(min(opts.count(), 8)):
+                best, best_score = None, 0
+                for i in range(min(opts.count(), 10)):
                     t = opts.nth(i).inner_text()
-                    if house and house in t and (not addr.zip or addr.zip in t
-                                                 or (addr.city and addr.city.lower() in t.lower())):
-                        opts.nth(i).click()
-                        return True
+                    if not house or not re.search(rf"\b{re.escape(house)}\b", t):
+                        continue
+                    score = (1 + 4 * bool(addr.zip and addr.zip in t)
+                             + 2 * bool(addr.unit and re.search(rf"\b{re.escape(addr.unit)}\b", t))
+                             + bool(addr.city and addr.city.lower() in t.lower()))
+                    if score > best_score:
+                        best, best_score = opts.nth(i), score
+                if best is not None:
+                    best.click()
+                    return True
                 break
             except Exception:
                 continue
         sug.click()
         return True
 
-    def submit(self) -> None:
+    def _pick_suggestion_by_text(self, addr: Address, timeout_ms: int = 4000) -> bool:
+        """Click a short visible element reading like '3147 Broadway ...' (not the input itself)."""
+        words = addr.line1.split()
+        if len(words) < 2:
+            return False
+        pat = re.compile(rf"\b{re.escape(words[0])}\s+{re.escape(words[1])}", re.I)
+        deadline = time.time() + timeout_ms / 1000
+        while time.time() < deadline:
+            best, best_score = None, -1
+            loc = self.page.get_by_text(pat)          # pierces open shadow DOM
+            try:
+                n = min(loc.count(), 20)
+            except Exception:
+                n = 0
+            for i in range(n):
+                el = loc.nth(i)
+                try:
+                    if not el.is_visible() or el.evaluate("e => ['INPUT','TEXTAREA'].includes(e.tagName)"):
+                        continue
+                    t = el.inner_text().strip()
+                    if not t or len(t) > 160 or t in getattr(self, "_baseline", set()):
+                        continue
+                    low = t.lower()
+                    score = (2 * bool(addr.zip and addr.zip in t)
+                             + 2 * bool(addr.unit and re.search(rf"\b{re.escape(addr.unit)}\b", t))
+                             + bool(addr.city and addr.city.lower() in low))
+                    if score > best_score:
+                        best, best_score = el, score
+                except Exception:
+                    continue
+            if best is not None:
+                try:
+                    best.click(timeout=3000)
+                    self.page.wait_for_timeout(800)
+                    return True
+                except Exception:
+                    pass
+            self.page.wait_for_timeout(400)
+        return False
+
+    def submit(self, near: Locator | None = None) -> None:
+        # 1) ISP-specific / generic submit selectors, 2) a button in the same form or block as the
+        # address box (avoids clicking an unrelated button elsewhere on the page), 3) Enter.
         btn = self.first_visible(self.submit_selectors, 1500)
+        if btn is None and near is not None:
+            for xp in ("xpath=ancestor::form[1]//button[not(@disabled)]",
+                       "xpath=ancestor::*[.//button][1]//button[not(@disabled)]"):
+                try:
+                    cand = near.locator(xp).first
+                    if cand.count() and cand.is_visible():
+                        btn = cand
+                        break
+                except Exception:
+                    continue
         if btn is not None:
             try:
                 btn.click(timeout=5000)
@@ -312,9 +452,10 @@ class BaseISPScraper:
             except PWTimeout:
                 pass
             text = self.body_text()
+            new = self._new_text(text)
             if (self._matches(self.blocked_patterns, text)
-                    or self._matches(self.not_serviceable_patterns, text)
-                    or self._matches(self.address_issue_patterns, text)
+                    or self._matches(self.not_serviceable_patterns, new)
+                    or self._matches(self.address_issue_patterns, new)
                     or (self._matches(self.results_ready_patterns, text) and self.page.url != start_url)):
                 break
             self.page.wait_for_timeout(1000)
@@ -339,6 +480,11 @@ class BaseISPScraper:
     def classify(self, text: str) -> str:
         if self._matches(self.blocked_patterns, text):
             return "blocked"
+        # Only judge on text that appeared after the address was submitted, so marketing copy
+        # like "not available in all areas" on the landing page is not mistaken for a verdict.
+        text = self._new_text(text)
+        if self._matches(self.call_to_order_patterns, text):
+            return "call_to_order"
         if self._matches(self.not_serviceable_patterns, text):
             return "not_serviceable"
         if self._matches(self.address_issue_patterns, text):
@@ -435,6 +581,74 @@ class BaseISPScraper:
         except Exception:
             pass
 
+    # ------------------------------------------------------------------ assisted mode
+    def assist(self, addr: Address, max_minutes: float = 10, on_update=None) -> ScrapeResult:
+        """Human-in-the-loop lookup for sites whose bot protection blocks automation.
+
+        Opens the ISP page and pre-fills the address. YOU pick the suggestion, open the plans and
+        click each 'Broadband Facts'. Every few seconds the scraper reads all open tabs and the
+        site's background responses. Close the browser window (or all its tabs) when done.
+        """
+        res = ScrapeResult(isp=self.key, address=addr.one_line(), location_id=addr.location_id)
+        ctx = self.page.context
+        chunks: list[tuple[str, str]] = []
+        seen: set[int] = set()
+
+        def watch(p):
+            p.on("response", self._on_response)
+        ctx.on("page", watch)
+
+        try:
+            self.open_start_page()
+            self.dismiss_popups()
+            field_ = self.first_visible(self.address_input_selectors, 4000)
+            if field_ is not None:          # pre-fill only; the human picks from the dropdown
+                field_.click()
+                field_.fill("")
+                field_.type(addr.one_line(include_unit=not self.unit_after_suggestion), delay=40)
+        except Exception as e:  # noqa: BLE001 - the human can still type it
+            res.message = f"pre-fill failed: {type(e).__name__}"
+
+        deadline = time.time() + max_minutes * 60
+        n_found = 0
+        while time.time() < deadline:
+            pages = [p for p in ctx.pages if not p.is_closed()]
+            if not pages:
+                break
+            for p in pages:
+                try:
+                    chunks.append(("dom_text", p.evaluate(DEEP_TEXT_JS) or ""))
+                    chunks.append(("html", p.content()))
+                    res.final_url = p.url
+                except Exception:
+                    continue
+            for resp in list(self._responses):           # read bodies before the page goes away
+                if id(resp) in seen:
+                    continue
+                seen.add(id(resp))
+                try:
+                    body = resp.text()
+                    if body and len(body) < 5_000_000:
+                        chunks.append((f"network:{resp.url[:120]}", body))
+                except Exception:
+                    pass
+            chunks = chunks[-400:]                        # keep memory bounded
+            upis = find_upis_in_many(chunks)
+            if len(upis) != n_found:
+                n_found = len(upis)
+                res.upis = enrich_upis(upis, chunks)
+                if on_update:
+                    on_update(res)
+            try:
+                pages[0].wait_for_timeout(2500)
+            except Exception:
+                time.sleep(2.5)
+
+        res.upis = enrich_upis(find_upis_in_many(chunks), chunks) or res.upis
+        res.status = "ok" if res.upis else "no_upi_found"
+        res.message = (res.message + " | assisted").strip(" |")
+        return res
+
     # ------------------------------------------------------------------ main
     def run(self, addr: Address) -> ScrapeResult:
         res = ScrapeResult(isp=self.key, address=addr.one_line(), location_id=addr.location_id)
@@ -471,6 +685,10 @@ class BaseISPScraper:
 
         res.upis = enrich_upis(res.upis, chunks)
         res.status = "ok" if res.upis else ("no_upi_found" if state == "loaded" else state)
+        if not res.upis and self._rejected and res.status in ("no_upi_found", "address_issue", "error"):
+            res.status = "blocked"
+            res.message = ("The site's bot protection refused the lookup (" + ", ".join(self._rejected[:3])
+                           + "). Use assisted mode.")
         try:
             res.final_url = self.page.url
         except Exception:
