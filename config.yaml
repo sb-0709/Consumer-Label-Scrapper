@@ -1,0 +1,52 @@
+# ---------------------------------------------------------------------------
+# Consumer Label Scraper configuration
+# ---------------------------------------------------------------------------
+bigquery:
+  project: broadband-data                                # billing project
+  location: US
+  # FCC National Broadband Map fixed availability: external Parquet table on gs://fcc_nbm/hive,
+  # partitioned by period (e.g. 2025_12) and state (full name). ALWAYS keep nbm_period set:
+  # without it every release for every state is scanned.
+  nbm_table: broadband-data.fcc_bdc.nbm_hive
+  nbm_period: "2025_06"        # June 2025 release -> pairs with Fabric v7
+  # CostQuest BSL Fabric (has the addresses). v7 = June 2025 (mentor's choice).
+  # NBM period and Fabric version must match: 2025_06 <-> v7, 2025_12 <-> v8.
+  fabric_table: broadband-data.bsl_fabric.v7
+  # Dataset where this project writes its own tables (created if missing)
+  output_dataset: broadband-data.consumer_labels
+  max_gb_billed: 200                                       # safety cap per query
+
+scope:
+  states: ["MD"]            # USPS codes; [] = whole country (~60+ GB per run!)
+  residential_only: true    # NBM business_residential_code in (R, X); Fabric building_type_code in (R, X)
+
+speed:                      # every ISP that counts toward competition must meet this
+  min_down: 100
+  min_up: 20
+
+competition:
+  # Which definition picks the most / least competitive blocks:
+  #   terrestrial : 100/20, any technology except satellite (60 GSO, 61 NGSO/LEO)
+  #   wired       : 100/20 over copper (10), cable (40), fiber (50)
+  #   fiber_fw    : 100/20 over fiber (50) or fixed wireless (70, 71, 72)
+  #   fiber       : 100/20 over fiber only (50)
+  definition: wired
+  competitive_threshold: 2  # block is "competitive" if >= this many ISPs ("more than one")
+  n_blocks_per_group: 5     # how many most- and least-competitive blocks to select
+  min_bsl_in_block: 5       # ignore tiny blocks with fewer serviceable locations
+
+sampling:
+  locations_per_block: 4    # at most this many random locations per block
+  max_locations_per_group: 20   # 10-20 per group (most / least)
+  seed: "fabric-v8"         # change to draw a different (but reproducible) random sample
+
+scraper:
+  isps: [att, verizon, spectrum, xfinity, frontier, cox]
+  headless: false           # watching the browser makes debugging much easier
+  browser_channel: null     # "chrome" to use your installed Google Chrome
+  slow_mo_ms: 50
+  timeout_ms: 45000
+  delay_between_requests_s: [8, 20]   # random polite pause between lookups
+  max_label_clicks: 25
+  save_artifacts: true      # screenshot + HTML of every lookup, for auditing
+  output_dir: outputs

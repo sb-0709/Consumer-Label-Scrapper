@@ -1,0 +1,9 @@
+google-cloud-bigquery>=3.25
+db-dtypes>=1.2
+pyarrow>=17
+pandas>=2.2
+playwright>=1.48
+streamlit>=1.38
+pyyaml>=6.0
+python-dotenv>=1.0
+pytest>=8.0

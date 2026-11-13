@@ -1,0 +1,2 @@
+[console_scripts]
+cls = clscraper.cli:main
