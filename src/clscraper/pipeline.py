@@ -128,16 +128,53 @@ def lookup_location(cfg: dict, location_id: str, log=print) -> dict | None:
     return rec
 
 
+def index_states(cfg: dict) -> list[str]:
+    """States the app's address lookup covers ([] = every state). Defaults to scope.states."""
+    app = cfg.get("app") or {}
+    return list(app["index_states"] if "index_states" in app else (cfg["scope"].get("states") or []))
+
+
+def location_source(cfg: dict) -> tuple[str, str]:
+    """(nested location table, NBM period) when app.location_table is set, else ("", nbm_period)."""
+    app = cfg.get("app") or {}
+    table = (app.get("location_table") or "").strip()
+    return table, str(app.get("period") or cfg["bigquery"].get("nbm_period") or "")
+
+
 def build_address_index(cfg: dict, log=print) -> None:
-    """One-time: Fabric addresses + NBM providers for the configured states (for the web app)."""
+    """One-time: addresses + NBM providers for app.index_states (for the web app).
+
+    Source: app.location_table (nested table with every NBM release) if set, otherwise NBM + Fabric.
+    """
     client = bq.get_client(cfg)
     bq.ensure_output_dataset(cfg, client)
-    t = bq.table_names(cfg)
-    log(f"Building {t['address_index_table']} for {cfg['scope'].get('states') or 'ALL states'} ...")
-    bq.run_query(cfg, bq.render("04_build_address_index.sql", **t),
-                 {"states": list(cfg["scope"].get("states") or [])}, fetch=False, client=client, log=log)
+    states = index_states(cfg)
+    t = bq.table_names(cfg, states=states)
+    table, period = location_source(cfg)
+    if table:
+        log(f"Building {t['address_index_table']} from {table}, NBM period {period}, {states or 'ALL states'} ...")
+        bq.run_query(cfg, bq.render("04b_build_index_from_locations.sql", location_table=table, **t),
+                     {"states": states, "period": period}, fetch=False, client=client, log=log)
+    else:
+        log(f"Building {t['address_index_table']} from NBM + Fabric for {states or 'ALL states'} ...")
+        bq.run_query(cfg, bq.render("04_build_address_index.sql", **t),
+                     {"states": states}, fetch=False, client=client, log=log)
     n = bq.run_query(cfg, f"SELECT COUNT(*) AS n FROM `{t['address_index_table']}`", client=client, log=log)
     log(f"  {int(n.iloc[0]['n']):,} locations indexed")
+
+
+def provider_coverage(cfg: dict, log=print) -> pd.DataFrame:
+    """Terrestrial providers in the indexed states, biggest first -> outputs/provider_coverage.csv."""
+    states = index_states(cfg)
+    t = bq.table_names(cfg, states=states)
+    table, period = location_source(cfg)
+    if table:
+        df = bq.run_query(cfg, bq.render("provider_coverage_from_locations.sql", location_table=table, **t),
+                          {"states": states, "period": period}, log=log)
+    else:
+        df = bq.run_query(cfg, bq.render("provider_coverage.sql", **t), log=log)
+    df.to_csv(output_dir(cfg) / "provider_coverage.csv", index=False)
+    return df
 
 
 def search_address(cfg: dict, street: str, zip_code: str, top: int = 8, log=print) -> list[dict]:

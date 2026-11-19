@@ -8,6 +8,10 @@
   cls scrape                     STEP 4  run ISP lookups for outputs/scrape_tasks.csv
   cls lookup --address "..."     one address, chosen ISPs (no BigQuery needed)
   cls build-index                one-time address lookup table for the web app
+  cls catalogs [--refresh]       download / list the ISPs' machine-readable plan files
+  cls coverage                   every NBM provider in the indexed states + whether it has a plan file
+  cls plans --location-id ID     plans at a location from the plan files (no ISP website needed)
+  cls plans --street "..." --zip 21201
   cls summary                    STEP 5  results by group x ISP
 """
 from __future__ import annotations
@@ -35,7 +39,6 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--isp", nargs="*", help="only these ISP keys")
     sp.add_argument("--limit", type=int, help="stop after N lookups (good for testing)")
     sp.add_argument("--manual", action="store_true", help="pause for you to finish in the browser when automation fails")
-    sp.add_argument("--assist", action="store_true", help="assisted mode: you click through each site, the app reads the labels")
     sp.add_argument("--headless", action="store_true")
     sp.add_argument("--no-resume", action="store_true", help="redo lookups already in scrape_results.csv")
 
@@ -45,11 +48,19 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--location-id", help="Fabric location_id (address + ISPs fetched from BigQuery)")
     lp.add_argument("--isp", nargs="*", help="ISP keys (default: all, or those NBM lists for the location)")
     lp.add_argument("--manual", action="store_true")
-    lp.add_argument("--assist", action="store_true")
     lp.add_argument("--headless", action="store_true")
 
     sub.add_parser("summary")
     sub.add_parser("build-index")
+    sub.add_parser("coverage")
+    cp = sub.add_parser("catalogs")
+    cp.add_argument("--refresh", action="store_true", help="download every configured plan file now")
+    pp = sub.add_parser("plans")
+    g2 = pp.add_mutually_exclusive_group(required=True)
+    g2.add_argument("--location-id")
+    g2.add_argument("--street", help="street address (with --zip), matched in the address index")
+    pp.add_argument("--zip")
+    pp.add_argument("--all-types", action="store_true", help="include low-income, prepaid, business plans")
     a = ap.parse_args(argv)
     cfg = load_config(a.config)
 
@@ -83,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         path = a.tasks or output_dir(cfg) / "scrape_tasks.csv"
         tasks = pd.read_csv(path, dtype=str).fillna("")
         out = scrape_tasks(cfg, tasks, isps=a.isp, manual=a.manual, headless=a.headless or None,
-                           resume=not a.no_resume, limit=a.limit, assist=a.assist)
+                           resume=not a.no_resume, limit=a.limit)
         print(f"\nResults: {out}")
         return 0
 
@@ -109,12 +120,62 @@ def main(argv: list[str] | None = None) -> int:
         else:
             addr = Address.parse(a.address)
         isps = isps or sorted(TUNED)
-        results = scrape_address(cfg, addr, isps, headless=a.headless or None, manual=a.manual, assist=a.assist)
+        results = scrape_address(cfg, addr, isps, headless=a.headless or None, manual=a.manual)
         rows = [r for res in results for r in res.rows()]
         df = pd.DataFrame(rows)
         print(df[["isp", "status", "upi", "frn", "message"]].to_string(index=False))
         from .scrapers.runner import append_rows
         append_rows(output_dir(cfg) / "lookup_results.csv", rows)
+        return 0
+
+    if a.cmd == "catalogs":
+        from . import catalog
+        if a.refresh:
+            for k in catalog.status().query("auto_download")["isp"]:
+                try:
+                    catalog.download(k)
+                except Exception as e:  # noqa: BLE001
+                    print(f"{k}: {e}")
+        else:
+            for k, err in catalog.ensure_fresh().items():
+                print(f"{k}: {err}")
+        print(catalog.status().to_string(index=False))
+        return 0
+
+    if a.cmd == "coverage":
+        from . import catalog
+        from .pipeline import provider_coverage
+        rep = catalog.coverage_report(provider_coverage(cfg), catalog.load_all())
+        print(rep[["brand_name", "frn", "technologies", "n_locations", "status"]].to_string(index=False))
+        done = rep["plan_file"] != ""
+        print(f"\n{done.sum()}/{len(rep)} providers have a plan file, covering "
+              f"{rep.loc[done, 'n_locations'].sum() / max(rep['n_locations'].sum(), 1):.0%} of provider-locations")
+        return 0
+
+    if a.cmd == "plans":
+        from . import catalog
+        if a.location_id:
+            from .pipeline import lookup_location
+            rec = lookup_location(cfg, a.location_id)
+        else:
+            from .pipeline import search_address
+            cands = search_address(cfg, a.street, a.zip or "")
+            rec = cands[0] if cands else None
+        if not rec:
+            print("No matching Fabric location.")
+            return 1
+        print(f"{rec['address_primary']}, {rec['city']} {rec['state']} {rec['zip']}  (location_id {rec['location_id']})")
+        catalog.ensure_fresh()
+        plans, coverage = catalog.match_location(rec["providers"], catalog.load_all(),
+                                                 residential_only=not a.all_types)
+        print(coverage.to_string(index=False))
+        summary = catalog.summarise(plans)
+        if not summary.empty:
+            print(summary[["nbm_provider", "nbm_technology", "plan_name", "down_mbps", "up_mbps",
+                           "monthly_price", "intro_price", "n_upis", "upi"]].to_string(index=False))
+            out = output_dir(cfg) / f"plans_{rec['location_id']}.csv"
+            summary.assign(location_id=rec["location_id"], address=rec["address_primary"]).to_csv(out, index=False)
+            print(f"\nSaved {out}")
         return 0
 
     if a.cmd == "summary":

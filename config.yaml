@@ -20,6 +20,17 @@ scope:
   states: ["MD"]            # USPS codes; [] = whole country (~60+ GB per run!)
   residential_only: true    # NBM business_residential_code in (R, X); Fabric building_type_code in (R, X)
 
+app:
+  # States the web app's address lookup covers (`cls build-index`). [] = every US state:
+  # one-time ~60 GB scan (about $0.40), then each lookup reads only a few MB (table is clustered by ZIP).
+  index_states: ["MD"]
+  # Where the app's addresses + providers come from (`cls build-index`):
+  #   location_table: a table with one row per location and every NBM release nested in
+  #                   provider_details (period = 2022_06 ... 2025_12). "" = build from nbm_table + fabric_table.
+  #   period:         which NBM release to show. Plan files are current, so the newest release fits best.
+  location_table: broadband-data.ck3378.combined_location_data   # Maryland, Fabric June 2025 (v7)
+  period: "2025_12"
+
 speed:                      # every ISP that counts toward competition must meet this
   min_down: 100
   min_up: 20

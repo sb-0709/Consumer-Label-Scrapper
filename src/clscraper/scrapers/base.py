@@ -25,8 +25,16 @@ from playwright.sync_api import Locator, Page
 from playwright.sync_api import TimeoutError as PWTimeout
 
 from ..label_parser import FIELDS as LABEL_FIELDS
-from ..label_parser import enrich_upis
+from ..label_parser import enrich_upis as _enrich_upis
 from ..upi import find_upis_in_many
+
+def enrich_upis(upis, chunks):
+    """Add label fields; if parsing fails, keep the plan IDs anyway."""
+    try:
+        return _enrich_upis(upis, chunks)
+    except Exception:  # noqa: BLE001
+        return upis
+
 
 # Collects visible text plus text inside open shadow roots (web components).
 DEEP_TEXT_JS = """
@@ -477,7 +485,15 @@ class BaseISPScraper:
         self.wait_for_results()
         return True
 
+    # URL fragments that mean "we don't serve this address" (e.g. Xfinity's partner-out-of-footprint page)
+    not_serviceable_url_patterns = [r"out-of-footprint", r"not-?serviceable", r"no-?service"]
+
     def classify(self, text: str) -> str:
+        try:
+            if self._matches(self.not_serviceable_url_patterns, self.page.url):
+                return "not_serviceable"
+        except Exception:
+            pass
         if self._matches(self.blocked_patterns, text):
             return "blocked"
         # Only judge on text that appeared after the address was submitted, so marketing copy
@@ -645,7 +661,8 @@ class BaseISPScraper:
                 time.sleep(2.5)
 
         res.upis = enrich_upis(find_upis_in_many(chunks), chunks) or res.upis
-        res.status = "ok" if res.upis else "no_upi_found"
+        res.status = "ok" if res.upis else (
+            "not_serviceable" if self._matches(self.not_serviceable_url_patterns, res.final_url or "") else "no_upi_found")
         res.message = (res.message + " | assisted").strip(" |")
         return res
 

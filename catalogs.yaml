@@ -1,0 +1,41 @@
+# Machine-readable Broadband Facts files ("plan files").
+#
+# FCC rule 47 CFR 8.1(a)(3) requires every ISP to publish all of its current labels as one
+# machine-readable file (usually CSV) at a public URL. We download each file ONCE per ISP
+# (not per address) and match its plans to what the National Broadband Map lists at a location.
+#
+#   url          direct link to the CSV. {date} is replaced by today's date (YYYY-MM-DD),
+#                trying the last few days if today's file is not up yet.
+#   frn          the ISP's FCC Registration Number (also inside every Unique Plan Identifier).
+#   source_page  where the ISP publicises the file (for the record / if the URL moves).
+#
+# No URL found yet? Download the file in your browser and add it in the app
+# (sidebar -> Plan files -> Add a plan file), or put it in data/catalogs/<key>/.
+
+catalogs:
+  att:
+    name: AT&T
+    frn: "0005937974"
+    url: https://www.att.com/scmsassets/nutritionlabels/csv/csvfile/BBFMachineReadable.csv
+    source_page: https://www.att.com/broadbandlabels/broadband-facts-machine-readable-plans/
+
+  xfinity:
+    name: Xfinity (Comcast)
+    frn: "0003768165"
+    url: https://www.xfinity.com/.well-known/broadband-labels/{date}-0003768165-USA-RESIDENTIAL.csv
+    source_page: https://www.xfinity.com/policies/internet-broadband-disclosures
+
+  verizon:
+    name: Verizon (Fios / 5G Home)
+    frn: ""
+    url: ""            # not found yet: verizon.com/about/broadband-facts loads labels in-page only
+    source_page: https://www.verizon.com/about/broadband-facts
+
+  spectrum:
+    name: Spectrum (Charter)
+    frn: ""
+    url: ""            # not found yet: spectrum.com refuses non-browser downloads
+    source_page: https://www.spectrum.com/policies/internet-service-disclosures
+
+# Download again when the cached file is older than this
+max_age_days: 7

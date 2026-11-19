@@ -52,17 +52,68 @@ and `share_bsl_competitive_<def>` (location-level measures, because an ISP may s
 ## The web app (Broadband Plan Finder)
 
 ```bash
-cls build-index        # one time: Maryland address lookup table in BigQuery (~0.7 GB scanned)
+cls build-index        # one time: address lookup table for app.index_states (MD: ~0.7 GB scanned)
 streamlit run app.py   # opens http://localhost:8501
 ```
 
+Fully automatic: no ISP website is opened per address.
+
 1. **Type an address.** It is matched to a Fabric location (ZIP + house number, fuzzy-matched street).
-   The page shows the FCC map's providers there: technology, max speeds, FRN, and whether we have a scraper.
-2. **Get plans.** Each ISP site is opened in its own browser (several at once). The address is
-   entered and every Broadband Facts label is read.
-3. **Plans** for each ISP: plan name, monthly price, introductory months and later price, contract,
-   typical download/upload speeds, latency, data cap, early termination fee, fees and the
-   Unique Plan Identifier. The full label text and a screenshot are included, and everything downloads as CSV.
+   The page shows the FCC map's providers there: technology, max speeds and FRN, plus whether each one has a plan file.
+2. **Plans at this address.** For each provider, the app takes the ISP's plan file (see below) and keeps the
+   plans that match it on:
+   - **ISP:** FRN, or brand name if the FRN isn't in the file
+   - **technology:** fiber / cable / copper / fixed wireless
+   - **speed:** at or below the max advertised speed the ISP reported for this location; upload is checked too,
+     which picks Xfinity's right variant (35 / 100 / 1000 up)
+
+   By default only residential plans are shown; a toggle adds low-income, prepaid and business plans.
+   You can download one row per plan tier, or every matching Unique Plan Identifier.
+3. **🗂️ ISP plan files tab.** Lists every provider in the FCC map for the indexed states, biggest first,
+   with whether it has a plan file and the share of provider-locations covered. Add a missing ISP **once**
+   from a link (CSV, labels page or PDF), from files (CSV, PDF, page saved with ⌘S) or from pasted label text.
+4. **🧪 Research sample tab.** Plans for every location sampled by `cls pipeline`, saved to `outputs/sample_plans.csv`.
+
+### Making it work for every ISP, at any address
+
+* **Data source:** `app.location_table` in config.yaml points at a location table with every NBM release nested
+  (`ck3378.combined_location_data`: Maryland, Fabric v7, releases 2022_06–2025_12). `app.period` picks the release
+  (default 2025_12, the newest, since the plan files are current). Leave `location_table` empty to build from
+  `nbm_table` + `fabric_table` instead. Run `cls build-index` again after changing either setting.
+* **Any address:** set `app.index_states` in config.yaml (`[]` = all states) and run `cls build-index` once.
+  The national build scans about 60 GB once (about $0.40). After that, each lookup reads a few MB, because the
+  table is clustered by ZIP.
+* **Every ISP:** run `cls coverage` (or use the tab) to get the to-do list. Each provider needs a plan file once:
+  1. **Downloadable CSV:** add its URL to `catalogs.yaml` and it is refreshed automatically.
+  2. **Labels page / PDF:** give the link or the file in the tab. The labels are parsed into
+     `data/catalogs/<isp>/labels.csv`.
+  3. **Labels only in the browser** (Verizon, T-Mobile): open the labels page in your normal browser, save it
+     (⌘S), upload. National-price plans (Verizon 5G/LTE Home, T-Mobile Home Internet) are then covered everywhere.
+  4. **Nothing online:** ask the provider for its machine-readable file. It is required by 47 CFR 8.1(a)(3).
+
+### Plan files (machine-readable labels)
+
+FCC rule 47 CFR 8.1(a)(3) requires each ISP to publish all its current labels as one machine-readable file.
+[catalogs.yaml](catalogs.yaml) lists where each one is. The app downloads each file **once per ISP**
+(not once per address) into `data/catalogs/<isp>/` and refreshes it weekly.
+
+| ISP | File | Notes |
+|---|---|---|
+| AT&T | `att.com/scmsassets/nutritionlabels/csv/csvfile/BBFMachineReadable.csv` | ~350 plans (fixed + mobile); AT&T's own column names |
+| Xfinity | `xfinity.com/.well-known/broadband-labels/<date>-0003768165-USA-RESIDENTIAL.csv` | FCC column format; ~98k rows (regional price variants) |
+| Verizon, Spectrum | not found yet | download in your browser, then *sidebar → Plan files → Add a plan file* |
+
+Any file in the FCC column format (`unique_plan_identifier`, `network_technology_type`, ...) works, for any ISP.
+
+```bash
+cls catalogs --refresh                         # download all plan files now
+cls plans --street "100 Holliday St" --zip 21202   # plans at a location, saved to outputs/
+```
+
+**Limits.** The files have no geography. A match means *the plan is consistent with what the ISP reported
+to the FCC map for this location*, not that the ISP's address check confirmed it. Where an ISP prices by
+region (Xfinity), one tier has many UPIs, so prices show as a range. Check a sample of addresses
+with step 3 to measure accuracy.
 
 Label fields are read by [label_parser.py](src/clscraper/label_parser.py) from the FCC's fixed label captions.
 Each search is also appended to `outputs/lookup_results.csv`.

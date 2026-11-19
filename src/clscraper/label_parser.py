@@ -25,9 +25,10 @@ PATTERNS = {
     "one_time_fees": r"one[-\s]?time\s*(?:fees|charges)(?:\s*at\s*the\s*time\s*of\s*purchase)?(.{0,300}?)(?=early\s*termination|government\s*taxes|discounts|$)",
     "early_termination_fee": rf"early\s*termination\s*fee{SEP}(\$\s*[\d,.]+|none|n/?a|not\s*applicable)",
     # values can be ranges on the label, e.g. "89-346 Mbps", "40-69 Milliseconds"
-    "typical_download": r"typical\s*download\s*speed[\W_]{0,12}([\d,.]+)(?:\s*[-\u2013to]+\s*([\d,.]+))?\s*(gbps|mbps|kbps)?",
-    "typical_upload": r"typical\s*upload\s*speed[\W_]{0,12}([\d,.]+)(?:\s*[-\u2013to]+\s*([\d,.]+))?\s*(gbps|mbps|kbps)?",
-    "typical_latency_ms": r"typical\s*latency[\W_]{0,12}([\d.]+(?:\s*[-\u2013]\s*[\d.]+)?)\s*(?:ms|milliseconds)?",
+    # numbers must start with a digit (pages put stray "." / "," next to captions)
+    "typical_download": r"typical\s*download\s*speed[\W_]{0,12}(\d[\d,]*(?:\.\d+)?)(?:\s*(?:-|\u2013|to)\s*(\d[\d,]*(?:\.\d+)?))?\s*(gbps|mbps|kbps)?",
+    "typical_upload": r"typical\s*upload\s*speed[\W_]{0,12}(\d[\d,]*(?:\.\d+)?)(?:\s*(?:-|\u2013|to)\s*(\d[\d,]*(?:\.\d+)?))?\s*(gbps|mbps|kbps)?",
+    "typical_latency_ms": r"typical\s*latency[\W_]{0,12}(\d+(?:\.\d+)?(?:\s*(?:-|\u2013)\s*\d+(?:\.\d+)?)?)\s*(?:ms|milliseconds)?",
     "data_included": rf"data\s*included(?:\s*with\s*monthly\s*price)?{SEP}(unlimited|[\d,.]+\s*(?:gb|tb))",
 }
 FIELDS = [f + "_mbps" if f in ("typical_download", "typical_upload") else f for f in PATTERNS] + ["label_text"]
@@ -47,13 +48,16 @@ def _clean(s: str) -> str:
 def parse_label(text: str) -> dict:
     out = {}
     for field, pat in PATTERNS.items():
-        m = re.search(pat, text, re.I | re.S)
-        if not m:
+        try:   # one odd field must never lose the whole label
+            m = re.search(pat, text, re.I | re.S)
+            if not m:
+                continue
+            if field in ("typical_download", "typical_upload"):
+                out[field + "_mbps"] = _speed(m)
+            else:
+                out[field] = _clean(m.group(1))[:200]
+        except (ValueError, IndexError):
             continue
-        if field in ("typical_download", "typical_upload"):
-            out[field + "_mbps"] = _speed(m)
-        else:
-            out[field] = _clean(m.group(1))[:200]
     return out
 
 

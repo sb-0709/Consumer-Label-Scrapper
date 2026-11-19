@@ -6,3 +6,4 @@ outputs/
 .browser_profiles/
 *.json.key
 service-account*.json
+data/
