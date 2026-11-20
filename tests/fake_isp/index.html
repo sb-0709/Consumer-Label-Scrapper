@@ -1,0 +1,20 @@
+<!doctype html><html><body>
+<h1>Fake Fiber Co</h1>
+<button id="open">Check availability</button>
+<div id="form" style="display:none">
+  <input id="street-box" placeholder="Enter your street address" autocomplete="off">
+  <ul class="addr-suggestions"></ul>
+  <button class="go-btn">See plans</button>
+</div>
+<script>
+  open_ = document.getElementById('open');
+  open_.onclick = () => { document.getElementById('form').style.display = 'block'; };
+  const box = document.getElementById('street-box'), ul = document.querySelector('.addr-suggestions');
+  box.oninput = () => {
+    ul.innerHTML = box.value.length > 3 ? `<li>${box.value.toUpperCase()} MD</li><li>OTHER ADDRESS</li>` : '';
+    ul.querySelectorAll('li').forEach(li => li.onclick = () => { box.value = li.textContent; ul.innerHTML = ''; });
+  };
+  document.querySelector('.go-btn').onclick = () => {
+    location.href = 'plans.html?a=' + encodeURIComponent(box.value);
+  };
+</script></body></html>

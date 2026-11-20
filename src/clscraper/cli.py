@@ -9,6 +9,9 @@
   cls lookup --address "..."     one address, chosen ISPs (no BigQuery needed)
   cls build-index                one-time address lookup table for the web app
   cls catalogs [--refresh]       download / list the ISPs' machine-readable plan files
+  cls setup-isp --name N --url U [--frn F]   one-time: record how an ISP's address check works
+  cls test-isp KEY               run a recorded ISP setup on a few addresses it serves
+  cls isp-sites                  list every ISP with a website check and its last test
   cls coverage                   every NBM provider in the indexed states + whether it has a plan file
   cls plans --location-id ID     plans at a location from the plan files (no ISP website needed)
   cls plans --street "..." --zip 21201
@@ -53,6 +56,16 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("summary")
     sub.add_parser("build-index")
     sub.add_parser("coverage")
+    su = sub.add_parser("setup-isp")
+    su.add_argument("--name", required=True, help='provider name, e.g. "Believe Broadband"')
+    su.add_argument("--url", required=True, help="page where customers enter their address")
+    su.add_argument("--frn", nargs="*", default=[], help="FCC registration number(s) of the provider")
+    su.add_argument("--key", help="short id (default: from the name)")
+    su.add_argument("--address", help="address to use while recording (default: one the provider serves)")
+    tu = sub.add_parser("test-isp")
+    tu.add_argument("key")
+    tu.add_argument("-n", type=int, default=3)
+    sub.add_parser("isp-sites")
     cp = sub.add_parser("catalogs")
     cp.add_argument("--refresh", action="store_true", help="download every configured plan file now")
     pp = sub.add_parser("plans")
@@ -140,6 +153,43 @@ def main(argv: list[str] | None = None) -> int:
             for k, err in catalog.ensure_fresh().items():
                 print(f"{k}: {err}")
         print(catalog.status().to_string(index=False))
+        return 0
+
+    if a.cmd == "setup-isp":
+        from . import recorder
+        from .catalog import slug
+        from .pipeline import sample_addresses_for_frn
+        key = a.key or slug(a.name)
+        samples = sample_addresses_for_frn(cfg, a.frn, n=4) if a.frn else []
+        first = a.address or (f"{samples[0]['address_primary']}, {samples[0]['city']}, {samples[0]['state']} "
+                              f"{samples[0]['zip']}" if samples else "")
+        if not first:
+            print("Give --frn (so an address the provider serves can be picked) or --address.")
+            return 1
+        print(f"Recording {a.name} on {a.url}. Use this address in the browser: {first}")
+        site = recorder.record(key, a.name, a.url, first, frns=a.frn)
+        print(f"Saved '{key}' to isp_sites.yaml: {site}")
+        if len(samples) > 1:
+            print("Testing automatically on other addresses it serves ...")
+            recorder.test_site(cfg, key, samples[1:])
+        return 0
+
+    if a.cmd == "test-isp":
+        from . import recorder
+        from .pipeline import sample_addresses_for_frn
+        site = recorder.load_all().get(a.key)
+        if not site:
+            print(f"No setup for '{a.key}' in isp_sites.yaml")
+            return 1
+        recorder.test_site(cfg, a.key, sample_addresses_for_frn(cfg, site.get("frns") or [], n=a.n))
+        return 0
+
+    if a.cmd == "isp-sites":
+        from . import recorder
+        for k, s_ in recorder.load_all().items():
+            t = s_.get("last_test") or {}
+            res = ", ".join(f"{r['status']}({r['plans']})" for r in t.get("results", []))
+            print(f"{k:28} {s_.get('name', ''):30} configured {s_.get('configured', '')}  last test {t.get('date', '-')}: {res}")
         return 0
 
     if a.cmd == "coverage":

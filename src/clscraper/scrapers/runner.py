@@ -94,7 +94,7 @@ def scrape_one_isp(cfg: dict, addr: Address, isp: str, *, headless: bool | None 
     if not assist and getattr(SCRAPERS.get(isp), "assisted_only", False):
         return ScrapeResult(isp=isp, address=addr.one_line(), location_id=addr.location_id,
                             status="needs_assisted",
-                            message="No automatic scraper for this provider; turn on Assisted mode.")
+                            message="No automatic website check for this provider yet.")
     try:
         with browser_context(cfg, isp, False if assist else headless) as ctx:
             return _scrape_one(ctx, cfg, isp, addr, manual, log, assist=assist, on_update=on_update)

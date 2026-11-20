@@ -145,6 +145,50 @@ def _load_known() -> None:
 _load_known()
 
 
+# --------------------------------------------------------------------------- ISPs set up with `cls setup-isp`
+SITES_FILE = ROOT / "isp_sites.yaml"
+_SITE_FRNS: dict[str, str] = {}              # FRN -> key, for ISPs configured with the setup recorder
+_SITE_PATTERNS: list[tuple[str, str]] = []   # (brand regex, key)
+
+
+def load_sites() -> dict:
+    return (yaml.safe_load(SITES_FILE.read_text()) or {}).get("sites", {}) if SITES_FILE.exists() else {}
+
+
+def site_scraper(key: str, site: dict) -> type[BaseISPScraper]:
+    """A scraper class from a recorded site configuration (recorded selectors first, defaults after)."""
+    B = BaseISPScraper
+    attrs = {
+        "key": key, "name": site.get("name", key), "start_url": site["start_url"], "assisted_only": False,
+        "open_form_selectors": list(site.get("open_form") or []) + B.open_form_selectors,
+        "address_input_selectors": list(site.get("address_input") or []) + B.address_input_selectors,
+        "suggestion_selectors": list(site.get("suggestion") or []) + B.suggestion_selectors,
+        "submit_selectors": list(site.get("submit") or []) + B.submit_selectors,
+        "label_link_patterns": list(site.get("label_links") or []) + B.label_link_patterns,
+        "text_pick_suggestion": True, "keyboard_pick_suggestion": bool(site.get("suggestion")),
+    }
+    if site.get("single_line_address"):            # unit + city + ZIP typed into the one box
+        attrs.update(unit_input_selectors=[], zip_input_selectors=[])
+    return type(f"{key}SiteScraper", (BaseISPScraper,), attrs)
+
+
+def register_sites() -> None:
+    _SITE_FRNS.clear()
+    _SITE_PATTERNS.clear()
+    for key, site in load_sites().items():
+        if not site.get("start_url"):
+            continue
+        SCRAPERS[key] = site_scraper(key, site)
+        TUNED.add(key)
+        for f in site.get("frns") or []:
+            _SITE_FRNS[str(f).zfill(10)] = key
+        if site.get("patterns"):
+            _SITE_PATTERNS.append((site["patterns"], key))
+
+
+register_sites()
+
+
 def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")[:40] or "provider"
 
@@ -162,8 +206,13 @@ def search_scraper(brand: str) -> str:
     return key
 
 
-def resolve_provider(brand: str | None) -> tuple[str, str]:
-    """NBM brand -> (scraper key, kind) with kind in tuned | known | search."""
+def resolve_provider(brand: str | None, frn: str | None = None) -> tuple[str, str]:
+    """NBM brand (+ FRN) -> (scraper key, kind) with kind in tuned | known | search."""
+    if frn and str(frn).zfill(10) in _SITE_FRNS:
+        return _SITE_FRNS[str(frn).zfill(10)], "tuned"
+    for pat, key in _SITE_PATTERNS:
+        if brand and re.search(pat, brand, re.I):
+            return key, "tuned"
     for key, pat in ISP_BRAND_PATTERNS.items():
         if brand and re.search(pat, brand, re.I):
             return key, "tuned"

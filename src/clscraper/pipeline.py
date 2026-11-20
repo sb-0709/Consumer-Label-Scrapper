@@ -93,7 +93,7 @@ def build_tasks(locs: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         for p in providers:
             if not qualifies(p, definition, min_down, min_up):
                 continue
-            key, kind = resolve_provider(p.get("brand_name"))
+            key, kind = resolve_provider(p.get("brand_name"), p.get("frn"))
             entry = by_isp.setdefault(key, {"frns": set(), "brands": set(), "techs": set(), "max_down": 0.0,
                                             "kind": kind})
             entry["frns"].add(p.get("frn"))
@@ -161,6 +161,20 @@ def build_address_index(cfg: dict, log=print) -> None:
                      {"states": states}, fetch=False, client=client, log=log)
     n = bq.run_query(cfg, f"SELECT COUNT(*) AS n FROM `{t['address_index_table']}`", client=client, log=log)
     log(f"  {int(n.iloc[0]['n']):,} locations indexed")
+
+
+def sample_addresses_for_frn(cfg: dict, frns: list[str], n: int = 3, log=print) -> list[dict]:
+    """A few random addresses the FCC map says these FRNs serve (to set up / test an ISP's website check)."""
+    t = bq.table_names(cfg)
+    sql = f"""
+      SELECT location_id, address_primary, city, state, zip
+      FROM `{t['address_index_table']}`, UNNEST(providers) AS p
+      WHERE p.frn IN UNNEST(@frns) AND p.technology NOT IN (60, 61)
+        AND address_primary IS NOT NULL AND (unit_count IS NULL OR unit_count <= 1)
+      GROUP BY 1, 2, 3, 4, 5
+      ORDER BY FARM_FINGERPRINT(CONCAT(location_id, CAST(CURRENT_DATE() AS STRING)))
+      LIMIT {int(n)}"""
+    return bq.run_query(cfg, sql, {"frns": [str(f).zfill(10) for f in frns]}, log=log).to_dict("records")
 
 
 def provider_coverage(cfg: dict, log=print) -> pd.DataFrame:

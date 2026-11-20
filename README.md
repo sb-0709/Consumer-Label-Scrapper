@@ -74,6 +74,32 @@ Fully automatic: no ISP website is opened per address.
    from a link (CSV, labels page or PDF), from files (CSV, PDF, page saved with ⌘S) or from pasted label text.
 4. **🧪 Research sample tab.** Plans for every location sampled by `cls pipeline`, saved to `outputs/sample_plans.csv`.
 
+### Per-address website checks: set up each ISP once
+
+Prices can differ by address, for example where there is more competition. To capture that, the app checks each
+provider's own website for the exact address (**Find plans → step 3**, and **Research sample → Check websites**).
+
+Each ISP's site is different, so each ISP is set up **once**:
+
+```bash
+cls setup-isp --name "Believe Broadband" --url https://<page where customers enter their address> --frn 0016095432
+```
+
+(or **🛠️ ISP setup** tab → pick the provider → paste the URL → *Set up website check*).
+
+1. A Chrome window opens with a blue instruction bar, plus an address the FCC map says this ISP serves.
+2. Do one lookup as a customer would: (open the form), click the address box and type the address, (pick it from
+   the dropdown), submit, (open one *Broadband Facts* label).
+3. The clicked elements are saved to `isp_sites.yaml`. The setup is then **tested automatically** on other
+   addresses the ISP serves (`cls test-isp <key>` re-runs the test; `cls isp-sites` lists all setups).
+
+From then on the ISP is checked automatically for every address. A website check is linked to a provider by
+its FRN, so it applies wherever the FCC map lists that FRN.
+
+**Limits.** Sites that block automated browsers (today: Verizon, Spectrum, Xfinity's results page; AT&T sometimes)
+return *blocked*. The app records that and does not try to get around it. Sites that only show a "contact us"
+form have no labels to read. When a site is redesigned, run the setup again.
+
 ### Making it work for every ISP, at any address
 
 * **Data source:** `app.location_table` in config.yaml points at a location table with every NBM release nested

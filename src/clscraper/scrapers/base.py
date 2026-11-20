@@ -705,7 +705,7 @@ class BaseISPScraper:
         if not res.upis and self._rejected and res.status in ("no_upi_found", "address_issue", "error"):
             res.status = "blocked"
             res.message = ("The site's bot protection refused the lookup (" + ", ".join(self._rejected[:3])
-                           + "). Use assisted mode.")
+                           + ").")
         try:
             res.final_url = self.page.url
         except Exception:

@@ -33,6 +33,26 @@ PLAN_COLUMNS = {
 }
 
 
+WEB_COLUMNS = {
+    "plan_name": "Plan", "monthly_price": "Monthly price ($)", "intro_months": "Intro (months)",
+    "price_after_intro": "Price after intro ($)", "typical_download_mbps": "Typical down (Mbps)",
+    "typical_upload_mbps": "Typical up (Mbps)", "typical_latency_ms": "Latency (ms)", "contract": "Contract",
+    "data_included": "Data", "one_time_fees": "One-time fees", "upi": "Unique Plan Identifier",
+}
+STATUS_TEXT = {
+    "ok": ("✅", "Plans found on the website"),
+    "no_upi_found": ("⚠️", "Page loaded, but no Broadband Facts labels were found"),
+    "not_serviceable": ("⛔", "The website says it does not serve this address"),
+    "address_issue": ("❓", "The website could not match the address"),
+    "blocked": ("🛑", "The website's bot protection refused the automated check"),
+    "needs_assisted": ("➖", "No automatic website check for this provider yet"),
+    "call_to_order": ("📞", "The website shows no online plans here (asks you to call)"),
+    "timeout": ("⏱️", "Timed out"),
+    "error": ("❌", "The website check failed"),
+}
+SITE_NAMES = {"att": "AT&T", "verizon": "Verizon", "spectrum": "Spectrum", "xfinity": "Xfinity"}
+
+
 @st.cache_data(show_spinner="Reading ISP plan files ...")
 def load_catalogs(files: tuple) -> dict:
     """Cached on the (isp, files, date) triples, so a new or updated file is picked up automatically."""
@@ -81,7 +101,7 @@ st.title("📡 Broadband Plan Finder")
 st.write("Enter an address to see every internet plan available there: the providers come from the "
          "FCC National Broadband Map, the plans from each provider's FCC **Broadband Facts** labels.")
 
-tab_find, tab_files, tab_sample = st.tabs(["🔎 Find plans", "🗂️ ISP plan files", "🧪 Research sample"])
+tab_find, tab_files, tab_sample = st.tabs(["🔎 Find plans", "🛠️ ISP setup", "🧪 Research sample"])
 
 # ================================================================ FIND PLANS
 with tab_find:
@@ -149,14 +169,69 @@ with tab_find:
                 prov[f"Meets {min_down:g}/{min_up:g}"] = [
                     "✅" if d >= min_down and u >= min_up else "—" for d, u in zip(prov["down"], prov["up"])]
                 prov["Technology"] = prov["technology"].map(TECH_NAMES)
-                prov["Plan file"] = ["✅" if catalog._catalog_for(p, cats)[1] else "❌ missing"
-                                     for p in prov.to_dict("records")]
                 st.dataframe(prov.rename(columns={"brand_name": "Provider", "down": "Max down (Mbps)",
                                                   "up": "Max up (Mbps)", "frn": "FRN"})[
                     ["Provider", "Technology", "Max down (Mbps)", "Max up (Mbps)",
-                     f"Meets {min_down:g}/{min_up:g}", "FRN", "Plan file"]], hide_index=True, width="stretch")
+                     f"Meets {min_down:g}/{min_up:g}", "FRN"]], hide_index=True, width="stretch")
 
-            st.subheader("3 · Plans at this address")
+            # ------------------------------------------------ 3 · each provider's website, this address
+            st.subheader("3 · Plans on each provider's website for this address")
+            from clscraper.scrapers import TUNED, Address
+            from clscraper.scrapers.isps import resolve_provider
+            site_keys: dict[str, dict] = {}
+            for p in (prov.to_dict("records") if not prov.empty else []):
+                k = resolve_provider(p["brand_name"], p.get("frn"))[0]
+                e = site_keys.setdefault(k, {"brands": [], "frns": set()})
+                e["brands"].append(p["brand_name"]); e["frns"].add(p["frn"])
+            checkable = [k for k in site_keys if k in TUNED]
+            unsupported = [b for k, e in site_keys.items() if k not in TUNED for b in dict.fromkeys(e["brands"])]
+            st.caption("The app opens each provider's website, enters this address and reads the Broadband Facts "
+                       "labels it shows, so prices and plans are specific to this address. Results are saved to "
+                       "`outputs/lookup_results.csv` with the location and census block.")
+            if unsupported:
+                st.caption(f"No website check set up yet for: {', '.join(dict.fromkeys(unsupported))}. "
+                           "Set it up once in the **ISP setup** tab.")
+            web = ss.setdefault("web_results", {})
+            if st.button("Check provider websites for this address", type="primary", disabled=not checkable):
+                from clscraper.scrapers.runner import append_rows, scrape_address
+                addr = Address(loc["address_primary"], loc["city"], loc["state"], loc["zip"],
+                               unit=a["unit"], location_id=loc["location_id"])
+                with st.status(f"Checking {len(checkable)} website(s) for {addr.one_line()} ...",
+                               expanded=True) as box:
+                    results = scrape_address(
+                        cfg, addr, checkable, headless=cfg["scraper"]["headless"], parallel=1, log=lambda *_: None,
+                        on_start=lambda k: box.write(f"⏳ {SITE_NAMES.get(k, k)} ..."),
+                        on_done=lambda r: box.write(f"{STATUS_TEXT.get(r.status, ('•', ''))[0]} "
+                                                    f"{SITE_NAMES.get(r.isp, r.isp)}: {len(r.upis)} plan(s)"))
+                    box.update(label="Done", state="complete")
+                rows = []
+                for r in results:
+                    rows += r.rows(extra={"nbm_frns": ";".join(sorted(site_keys[r.isp]["frns"])),
+                                          "nbm_brand": ";".join(dict.fromkeys(site_keys[r.isp]["brands"])),
+                                          "block_geoid": loc["block_geoid"]})
+                append_rows(OUT / "lookup_results.csv", rows)
+                web[loc["location_id"]] = (results, rows)
+            if loc["location_id"] in web:
+                results, rows = web[loc["location_id"]]
+                found = pd.DataFrame([r for r in rows if r.get("upi")])
+                if not found.empty:
+                    st.download_button("⬇️ Plans from the websites for this address (CSV)",
+                                       found.assign(city=loc["city"], zip=loc["zip"]).to_csv(index=False),
+                                       f"website_plans_{loc['location_id']}.csv", "text/csv")
+                for r in results:
+                    icon, text = STATUS_TEXT.get(r.status, ("•", r.status))
+                    with st.container(border=True):
+                        st.markdown(f"**{SITE_NAMES.get(r.isp, r.isp)}** · {icon} {text}"
+                                    + (f" — **{len(r.upis)} plan(s)**" if r.upis else ""))
+                        if r.upis:
+                            df = pd.DataFrame(r.upis)
+                            cols = [c for c in WEB_COLUMNS if c in df.columns]
+                            st.dataframe(df[cols].rename(columns=WEB_COLUMNS), hide_index=True, width="stretch")
+                        if r.message and r.status != "ok":
+                            st.caption(r.message[:300])
+
+            # ------------------------------------------------ 4 · published plan files (reference)
+            st.subheader("4 · Plans from the providers' published plan files (reference)")
             all_types = st.toggle("Include low-income, prepaid and business plans", value=False)
             plans, coverage = catalog.match_location(loc["providers"], cats, residential_only=not all_types)
             summary = catalog.summarise(plans)
@@ -192,14 +267,92 @@ with tab_find:
                     st.caption(f"⚠️ {r['provider']} ({TECH_NAMES.get(r['technology'], r['technology'])}, "
                                f"{r['nbm_max_down']:g}/{r['nbm_max_up']:g} Mbps): plan file loaded, but no plan "
                                f"matches this technology and speed.")
-            st.caption("How plans are matched: same provider (FRN in the Unique Plan Identifier, or brand name), "
+            st.caption("These come from each provider's published list of all its plans, matched to this address by "
+                       "technology and speed; they are not address-specific prices. How plans are matched: same provider (FRN in the Unique Plan Identifier, or brand name), "
                        "same technology, and plan speed ≤ the max speed the provider reported to the FCC for this "
                        "location. Plan files carry no geography, so these are plans consistent with the FCC map "
                        "at this address.")
 
-# ================================================================ ISP PLAN FILES
+# ================================================================ ISP SETUP
 with tab_files:
-    st.subheader("Which ISPs have a plan file?")
+    from clscraper import recorder
+    from clscraper.scrapers import TUNED as _TUNED
+    from clscraper.scrapers.isps import resolve_provider as _resolve
+
+    st.subheader("Website checks: set up each ISP once")
+    st.markdown(
+        "To check plans **per address**, the app needs to know how each ISP's address check works. You show it "
+        "once: a Chrome window opens on the ISP's site with an instruction bar on top. Do one address lookup as a "
+        "customer would (click the address box, type the address it gives you, pick it from the dropdown, submit, "
+        "open one *Broadband Facts* label). The app records those steps and then repeats them **automatically for "
+        "every address**. It tests the setup right away on other addresses the ISP serves.")
+    cov_path = OUT / "provider_coverage.csv"
+    sites = recorder.load_all()
+    if cov_path.exists():
+        provs_all = pd.read_csv(cov_path, dtype={"frn": str})
+        provs_all["frn"] = provs_all["frn"].str.zfill(10)
+
+        def site_status(r):
+            k, kind = _resolve(r["brand_name"], r["frn"])
+            if k in sites:
+                t = (sites[k].get("last_test") or {}).get("results", [])
+                ok = sum(x["status"] == "ok" for x in t)
+                return f"✅ set up {sites[k].get('configured', '')}" + (f" · last test {ok}/{len(t)} ok" if t else "")
+            if k in _TUNED:
+                return "✅ built in"
+            return "➖ not set up"
+
+        provs_all["Website check"] = [site_status(r) for _, r in provs_all.iterrows()]
+        n_set = (provs_all["Website check"] != "➖ not set up").sum()
+        st.caption(f"{n_set} of {len(provs_all)} providers have a website check.")
+        st.dataframe(provs_all.rename(columns={"brand_name": "Provider", "frn": "FRN",
+                                               "n_locations": "Locations served"})[
+            ["Provider", "FRN", "Locations served", "Website check"]], hide_index=True, width="stretch", height=260)
+        todo = provs_all.reset_index(drop=True)
+        pick = st.selectbox("Provider to set up", range(len(todo)),
+                            format_func=lambda i: f"{todo.loc[i, 'brand_name']} · FRN {todo.loc[i, 'frn']} · "
+                                                  f"{todo.loc[i, 'Website check']}")
+        row = todo.loc[pick]
+        site_url = st.text_input("Page on the ISP's website where customers enter their address",
+                                 value=(sites.get(catalog.slug(row["brand_name"])) or {}).get("start_url", ""),
+                                 placeholder="https://www.example-isp.com/check-availability")
+        c1, c2 = st.columns(2)
+        if c1.button("Set up website check", type="primary", disabled=not site_url.startswith("http")):
+            from clscraper.pipeline import sample_addresses_for_frn
+            key = catalog.slug(row["brand_name"])
+            frns = list(provs_all[provs_all["brand_name"] == row["brand_name"]]["frn"].unique())
+            samples = sample_addresses_for_frn(cfg, frns, n=3, log=lambda *_: None)
+            if not samples:
+                st.error("No address served by this provider found in the address table.")
+            else:
+                first = samples[0]
+                first_line = f"{first['address_primary']}, {first['city']}, {first['state']} {first['zip']}"
+                with st.spinner(f"A Chrome window is open on {site_url}. Follow the blue bar at the top, using "
+                                f"the address {first_line}. Close the window when it says the setup is recorded."):
+                    try:
+                        recorder.record(key, row["brand_name"], site_url, first_line, frns=frns,
+                                        log=lambda *_: None)
+                    except Exception as e:  # noqa: BLE001
+                        st.error(str(e))
+                        samples = []
+                if samples:
+                    with st.spinner("Testing the setup automatically on other addresses it serves ..."):
+                        res = recorder.test_site(cfg, key, samples[1:] or samples, log=lambda *_: None)
+                    st.success(f"{row['brand_name']}: website check saved.")
+                    st.dataframe(pd.DataFrame(res), hide_index=True, width="stretch")
+        k_existing = _resolve(row["brand_name"], row["frn"])[0]
+        if c2.button("Test again", disabled=k_existing not in sites):
+            from clscraper.pipeline import sample_addresses_for_frn
+            frns = sites[k_existing].get("frns") or [row["frn"]]
+            with st.spinner("Testing on 3 addresses it serves ..."):
+                res = recorder.test_site(cfg, k_existing, sample_addresses_for_frn(cfg, frns, n=3, log=lambda *_: None),
+                                         log=lambda *_: None)
+            st.dataframe(pd.DataFrame(res), hide_index=True, width="stretch")
+    else:
+        st.info("Load the provider list first (button below).")
+
+    st.divider()
+    st.subheader("Published plan files (reference)")
     cov_path = OUT / "provider_coverage.csv"
     c1, c2 = st.columns([1, 3])
     if c1.button("Load provider list from BigQuery"):
@@ -315,3 +468,43 @@ with tab_sample:
                 st.markdown(f"**{len(plans_s)} plan tiers** across {plans_s['location_id'].nunique()} locations")
                 st.dataframe(plans_s, hide_index=True, width="stretch")
                 st.download_button("⬇️ sample_plans.csv", plans_s.to_csv(index=False), "sample_plans.csv")
+
+    st.divider()
+    st.markdown("#### Check the providers' websites for every sampled location")
+    tasks_path = OUT / "scrape_tasks.csv"
+    if not tasks_path.exists():
+        st.info("No task list yet. Run `cls pipeline`.")
+    else:
+        from clscraper.scrapers import TUNED
+        from clscraper.scrapers.isps import resolve_provider as _rp
+        tasks = pd.read_csv(tasks_path, dtype=str).fillna("")
+        # re-resolve, so ISPs set up after sampling are included
+        tasks["isp"] = [_rp(b.split(";")[0], f.split(";")[0])[0] if b else k
+                        for b, f, k in zip(tasks.get("nbm_brand", ""), tasks.get("nbm_frns", ""), tasks["isp"])]
+        tasks = tasks[tasks["isp"].isin(TUNED)]
+        st.write(f"{len(tasks)} (location, provider) website checks for "
+                 f"{', '.join(SITE_NAMES.get(k, k) for k in sorted(tasks['isp'].unique()))}. "
+                 "Results go to `outputs/scrape_results.csv`; finished checks are skipped on the next run.")
+        limit = st.number_input("Max checks this run (0 = all)", 0, 10000, 10)
+        if st.button("Check websites for the sampled locations"):
+            from clscraper.scrapers.runner import scrape_tasks
+            bar, line = st.progress(0.0), st.empty()
+
+            def progress(i, n, res):
+                bar.progress(i / max(n, 1))
+                line.write(f"{i}/{n} · {SITE_NAMES.get(res.isp, res.isp)} · {res.location_id}: "
+                           f"{STATUS_TEXT.get(res.status, ('', res.status))[1]}")
+
+            scrape_tasks(cfg, tasks, headless=cfg["scraper"]["headless"], limit=limit or None,
+                         progress=progress, log=lambda *_: None)
+        res_path = OUT / "scrape_results.csv"
+        if res_path.exists():
+            res = pd.read_csv(res_path, dtype=str).fillna("")
+            st.markdown("**Website checks by group × provider**")
+            st.dataframe(pd.crosstab([res["grp"], res["isp"]], res["status"]), width="stretch")
+            ok = res[res["upi"] != ""]
+            if not ok.empty:
+                st.dataframe(ok[["grp", "block_geoid", "location_id", "isp", "plan_name", "monthly_price",
+                                 "typical_download_mbps", "typical_upload_mbps", "upi"]], hide_index=True,
+                             width="stretch")
+            st.download_button("⬇️ scrape_results.csv", res.to_csv(index=False), "scrape_results.csv")
